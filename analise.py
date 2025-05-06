@@ -2,8 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import numpy as np
 
-# Configuração da página
+# ========================================
+# CONFIGURAÇÃO DA PÁGINA
+# ========================================
 st.set_page_config(
     page_title="Análise de Vendas Avançada",
     page_icon="📊",
@@ -36,28 +39,31 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Título e descrição
-st.title("📊 Painel de Análise de Vendas")
-st.markdown("""
-    Visualize e analise o desempenho de vendas com métricas detalhadas e gráficos interativos.
-    Utilize os filtros na barra lateral para personalizar sua análise.
-""")
-st.markdown("---")
+# ========================================
+# FUNÇÕES PRINCIPAIS
+# ========================================
 
-# Função para carregar dados
 @st.cache_data
 def load_data(uploaded_file):
+    """Carrega e trata os dados do arquivo."""
     try:
         if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
+            df = pd.read_csv(uploaded_file, parse_dates=True, dayfirst=True, infer_datetime_format=True)
         else:
-            df = pd.read_excel(uploaded_file)
+            df = pd.read_excel(uploaded_file, parse_dates=True)
         
-        # Verificar e padronizar colunas
-        required_cols = {'data': ['Data', 'DATE', 'data_venda'],
-                        'valor': ['Valor', 'VALUE', 'total'],
-                        'empresa': ['Empresa', 'Cliente', 'CLIENTE'],
-                        'vendedor': ['Vendedor', 'Responsável', 'VENDEDOR']}
+        # Padroniza nomes de colunas
+        df.columns = df.columns.str.lower().str.replace(' ', '_')
+        
+        # Identifica coluna de data automaticamente
+        date_cols = [col for col in df.columns if any(keyword in col for keyword in ['data', 'date', 'dt'])]
+        if date_cols:
+            df['data'] = pd.to_datetime(df[date_cols[0]], errors='coerce', dayfirst=True)
+        
+        # Verifica colunas essenciais
+        required_cols = {'valor': ['valor', 'total', 'venda', 'amount'],
+                        'empresa': ['empresa', 'cliente', 'customer'],
+                        'vendedor': ['vendedor', 'responsavel', 'seller']}
         
         for standard_col, possible_cols in required_cols.items():
             for col in possible_cols:
@@ -65,14 +71,11 @@ def load_data(uploaded_file):
                     df.rename(columns={col: standard_col}, inplace=True)
                     break
         
-        # Conversão de tipos
-        df['data'] = pd.to_datetime(df['data'], errors='coerce')
+        # Conversão de tipos e limpeza
         df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
+        df = df.dropna(subset=['data', 'valor'])
         
-        # Remover linhas com valores críticos ausentes
-        df = df.dropna(subset=['data', 'valor', 'empresa'])
-        
-        # Adicionar colunas derivadas
+        # Adiciona colunas temporais
         df['mês'] = df['data'].dt.to_period('M').astype(str)
         df['trimestre'] = df['data'].dt.to_period('Q').astype(str)
         df['ano'] = df['data'].dt.year.astype(str)
@@ -80,11 +83,11 @@ def load_data(uploaded_file):
         return df
     
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {str(e)}")
+        st.error(f"Erro ao carregar arquivo: {str(e)}")
         return None
 
-# Componentes da barra lateral
-def sidebar_filters(df):
+def create_filters(df):
+    """Cria os filtros na sidebar."""
     st.sidebar.header("🔍 Filtros")
     
     # Filtro de período
@@ -93,8 +96,8 @@ def sidebar_filters(df):
     date_range = st.sidebar.date_input(
         "Período",
         [min_date, max_date],
-        min_date=min_date,
-        max_date=max_date
+        min_value=min_date,
+        max_value=max_date
     )
     
     # Filtros de seleção múltipla
@@ -113,62 +116,39 @@ def sidebar_filters(df):
     # Filtro de valor
     min_val, max_val = float(df['valor'].min()), float(df['valor'].max())
     val_range = st.sidebar.slider(
-        "Faixa de Valor",
+        "Faixa de Valor (R$)",
         min_val, max_val, (min_val, max_val)
-    )
-    
-    # Filtro temporal
-    time_granularity = st.sidebar.selectbox(
-        "Agrupamento Temporal",
-        ["Diário", "Semanal", "Mensal", "Trimestral", "Anual"]
     )
     
     return {
         'date_range': date_range,
         'empresas': empresas,
         'vendedores': vendedores,
-        'val_range': val_range,
-        'time_granularity': time_granularity
+        'val_range': val_range
     }
 
-# Aplicar filtros
 def apply_filters(df, filters):
+    """Aplica os filtros selecionados."""
     filtered_df = df.copy()
     
-    # Filtrar por data
+    # Filtros de data
     filtered_df = filtered_df[
         (filtered_df['data'].dt.date >= filters['date_range'][0]) & 
         (filtered_df['data'].dt.date <= filters['date_range'][1])
     ]
     
-    # Filtrar por empresa e vendedor
+    # Outros filtros
     filtered_df = filtered_df[
         (filtered_df['empresa'].isin(filters['empresas'])) &
-        (filtered_df['vendedor'].isin(filters['vendedores']))
-    ]
-    
-    # Filtrar por valor
-    filtered_df = filtered_df[
+        (filtered_df['vendedor'].isin(filters['vendedores'])) &
         (filtered_df['valor'] >= filters['val_range'][0]) &
         (filtered_df['valor'] <= filters['val_range'][1])
     ]
     
-    # Determinar agrupamento temporal
-    if filters['time_granularity'] == "Diário":
-        filtered_df['periodo'] = filtered_df['data'].dt.date.astype(str)
-    elif filters['time_granularity'] == "Semanal":
-        filtered_df['periodo'] = filtered_df['data'].dt.to_period('W').astype(str)
-    elif filters['time_granularity'] == "Mensal":
-        filtered_df['periodo'] = filtered_df['mês']
-    elif filters['time_granularity'] == "Trimestral":
-        filtered_df['periodo'] = filtered_df['trimestre']
-    else:
-        filtered_df['periodo'] = filtered_df['ano']
-    
     return filtered_df
 
-# Métricas de resumo
-def display_summary_metrics(df):
+def display_metrics(df):
+    """Exibe as métricas principais."""
     st.subheader("📌 Métricas Principais")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -187,168 +167,130 @@ def display_summary_metrics(df):
     
     st.markdown("---")
 
-# Visualizações gráficas
-def display_visualizations(df, time_granularity):
+def create_visualizations(df):
+    """Cria as visualizações gráficas."""
     st.subheader("📈 Visualizações")
     
+    # Abas para diferentes visualizações
     tab1, tab2, tab3, tab4 = st.tabs([
         "Evolução Temporal", 
-        "Distribuição por Vendedor", 
+        "Desempenho por Vendedor", 
         "Top Clientes", 
-        "Análise Detalhada"
+        "Distribuição"
     ])
     
     with tab1:
-        # Gráfico de evolução temporal
-        temp_df = df.groupby('periodo').agg({
-            'valor': 'sum',
-            'empresa': 'nunique'
-        }).reset_index()
-        
+        # Evolução temporal
+        temp_df = df.groupby('mês').agg({'valor': 'sum'}).reset_index()
         fig = px.line(
-            temp_df,
-            x='periodo',
-            y='valor',
-            title=f"Vendas {time_granularity.lower()} (Total: R$ {df['valor'].sum():,.2f})",
-            labels={'valor': 'Valor (R$)', 'periodo': 'Período'},
+            temp_df, x='mês', y='valor',
+            title="Vendas Mensais",
+            labels={'valor': 'Valor (R$)', 'mês': 'Mês'},
             markers=True
         )
         fig.update_layout(hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
     
     with tab2:
-        # Gráfico de desempenho por vendedor
-        vendedor_df = df.groupby('vendedor').agg({
-            'valor': ['sum', 'count'],
+        # Desempenho por vendedor
+        seller_df = df.groupby('vendedor').agg({
+            'valor': 'sum',
             'empresa': 'nunique'
-        }).reset_index()
-        vendedor_df.columns = ['Vendedor', 'Valor Total', 'Nº Vendas', 'Clientes Únicos']
+        }).sort_values('valor', ascending=False).reset_index()
         
         fig = px.bar(
-            vendedor_df.sort_values('Valor Total', ascending=False),
-            x='Vendedor',
-            y='Valor Total',
-            color='Nº Vendas',
-            title="Desempenho por Vendedor",
-            text='Valor Total',
-            hover_data=['Clientes Únicos']
+            seller_df, x='vendedor', y='valor',
+            color='empresa',
+            title="Vendas por Vendedor",
+            labels={'valor': 'Valor (R$)', 'vendedor': 'Vendedor', 'empresa': 'Clientes Únicos'},
+            text_auto='.2s'
         )
-        fig.update_traces(texttemplate='R$ %{text:,.2f}', textposition='outside')
         st.plotly_chart(fig, use_container_width=True)
     
     with tab3:
         # Top clientes
-        top_clientes = df.groupby('empresa')['valor'].sum().nlargest(10).reset_index()
+        top_clients = df.groupby('empresa')['valor'].sum().nlargest(10).reset_index()
         
         fig = px.bar(
-            top_clientes,
-            x='empresa',
-            y='valor',
-            title="Top 10 Clientes por Valor",
+            top_clients, x='empresa', y='valor',
+            title="Top 10 Clientes",
             labels={'valor': 'Valor (R$)', 'empresa': 'Empresa'},
-            text='valor',
             color='valor',
-            color_continuous_scale='Blues'
+            text_auto='.2s'
         )
-        fig.update_traces(texttemplate='R$ %{text:,.2f}', textposition='outside')
         st.plotly_chart(fig, use_container_width=True)
     
     with tab4:
-        # Análise detalhada
-        st.dataframe(
-            df.sort_values('valor', ascending=False),
-            column_config={
-                "data": st.column_config.DateColumn("Data"),
-                "valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
-                "empresa": "Empresa",
-                "vendedor": "Vendedor"
-            },
-            hide_index=True,
-            use_container_width=True,
-            height=500
+        # Distribuição de valores
+        fig = px.box(
+            df, y='valor', x='vendedor',
+            title="Distribuição de Valores por Vendedor",
+            points="all"
         )
+        st.plotly_chart(fig, use_container_width=True)
 
-# Sistema de alertas
 def display_alerts(df):
+    """Exibe alertas inteligentes."""
     st.sidebar.header("⚠️ Alertas")
+    threshold = st.sidebar.number_input("Limite para alertas (R$)", value=10000)
     
-    # Configuração de limiares
-    alert_threshold = st.sidebar.number_input(
-        "Limite para alertas (R$)", 
-        min_value=0, 
-        value=10000,
-        step=1000
-    )
-    
-    # Verificar alertas
-    with st.expander("🔔 Alertas e Insights", expanded=True):
-        # Vendedores com baixo desempenho
-        low_performers = df.groupby('vendedor')['valor'].sum().nsmallest(3)
-        if any(low_performers < alert_threshold):
+    with st.expander("🔔 Alertas", expanded=True):
+        # Vendedores abaixo do limiar
+        low_performers = df.groupby('vendedor')['valor'].sum()[lambda x: x < threshold]
+        if not low_performers.empty:
             st.warning("**Vendedores com Baixo Desempenho**")
             for seller, amount in low_performers.items():
                 st.write(f"- {seller}: R$ {amount:,.2f}")
         
-        # Clientes inativos recentemente
+        # Clientes inativos
         latest_date = df['data'].max()
-        active_customers = df[df['data'] >= (latest_date - pd.Timedelta(days=90))]['empresa'].unique()
-        all_customers = df['empresa'].unique()
-        inactive_customers = set(all_customers) - set(active_customers)
-        
-        if inactive_customers:
-            st.warning(f"**Clientes Inativos (últimos 90 dias):** {len(inactive_customers)}")
-            if st.button("Mostrar lista"):
-                st.write(list(inactive_customers))
-        
-        # Transações anômalas (outliers)
-        Q1 = df['valor'].quantile(0.25)
-        Q3 = df['valor'].quantile(0.75)
-        IQR = Q3 - Q1
-        outliers = df[(df['valor'] < (Q1 - 1.5 * IQR)) | (df['valor'] > (Q3 + 1.5 * IQR))]
-        
-        if not outliers.empty:
-            st.info(f"**Transações Anômalas Detectadas:** {len(outliers)}")
-            st.dataframe(outliers, hide_index=True)
+        inactive = set(df['empresa'].unique()) - set(df[df['data'] >= (latest_date - pd.Timedelta(days=90))]['empresa'].unique())
+        if inactive:
+            st.warning(f"**Clientes Inativos (últimos 90 dias):** {len(inactive)}")
 
-# Função principal
+# ========================================
+# FUNÇÃO PRINCIPAL
+# ========================================
+
 def main():
+    st.title("📊 Painel de Análise de Vendas")
+    st.markdown("Visualize e analise o desempenho de vendas com métricas detalhadas.")
+    
     # Upload do arquivo
     uploaded_file = st.file_uploader(
-        "📤 Carregue seu arquivo de vendas (CSV ou Excel)",
+        "Carregue seu arquivo de vendas (CSV ou Excel)",
         type=["csv", "xlsx", "xls"],
-        help="O arquivo deve conter colunas para data, valor, empresa e vendedor"
+        help="O arquivo deve conter colunas para data, valor e identificadores"
     )
     
     if uploaded_file is not None:
         df = load_data(uploaded_file)
         
         if df is not None:
-            # Mostrar pré-visualização dos dados
-            with st.expander("🔍 Visualizar Dados Carregados", expanded=False):
-                st.dataframe(df.head(), hide_index=True)
-                st.write(f"Total de registros: {len(df):,}")
-                st.write(f"Período coberto: {df['data'].min().date()} a {df['data'].max().date()}")
+            # Pré-visualização dos dados
+            with st.expander("🔍 Visualizar Dados", expanded=False):
+                st.dataframe(df.head(3))
+                st.write(f"Registros carregados: {len(df):,}")
+                st.write(f"Período: {df['data'].min().date()} a {df['data'].max().date()}")
             
             # Filtros e processamento
-            filters = sidebar_filters(df)
+            filters = create_filters(df)
             filtered_df = apply_filters(df, filters)
             
-            # Exibir resultados
-            display_summary_metrics(filtered_df)
-            display_visualizations(filtered_df, filters['time_granularity'])
+            # Exibição dos resultados
+            display_metrics(filtered_df)
+            create_visualizations(filtered_df)
             display_alerts(filtered_df)
             
-            # Opção para exportar
+            # Exportação
             st.sidebar.download_button(
-                "💾 Exportar Dados Filtrados",
+                "💾 Exportar Dados",
                 data=filtered_df.to_csv(index=False).encode('utf-8'),
-                file_name=f"vendas_filtradas_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"vendas_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
             )
     else:
-        st.info("Por favor, carregue um arquivo para iniciar a análise")
-        st.image("https://cdn.pixabay.com/photo/2017/08/06/22/01/upload-2598377_1280.png", 
-                width=400, caption="Arraste e solte seu arquivo de vendas aqui")
+        st.info("Carregue um arquivo para iniciar a análise")
 
 if __name__ == "__main__":
     main()
